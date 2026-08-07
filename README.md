@@ -12,6 +12,10 @@ on: [push]
 
 jobs:
   devsecops:
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     uses: slackerwx/ci-orchestrator/.github/workflows/devsecops.yaml@main
     with:
       language: go
@@ -19,3 +23,5 @@ jobs:
       VLAB_URL: ${{ secrets.VLAB_URL }}
       VLAB_INGEST_TOKEN: ${{ secrets.VLAB_INGEST_TOKEN }}
 ```
+
+O bloco `permissions` no job caller é obrigatório: um reusable workflow só restringe as permissões herdadas do chamador, nunca amplia. Sem `packages: write` e `id-token: write` declarados aí, o job `package` falha (push no GHCR com 403, assinatura Cosign sem token OIDC).
