@@ -1,0 +1,139 @@
+name: devsecops
+on:
+  workflow_call:
+    inputs:
+      language:
+        required: true
+        type: string
+    secrets:
+      VLAB_URL:
+        required: true
+      VLAB_INGEST_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - if: inputs.language == 'go'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - if: inputs.language == 'go'
+        run: go build ./...
+      - if: inputs.language == 'node'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - if: inputs.language == 'node'
+        run: npm ci
+
+  sast:
+    name: sast
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pipx install semgrep==1.172.0
+      - run: semgrep scan --config auto --sarif --output semgrep.sarif || true
+      - run: >
+          curl -sf -X POST "$VLAB_URL/api/ingest/sarif"
+          -H "authorization: Bearer $VLAB_INGEST_TOKEN"
+          -H "content-type: application/json"
+          --data-binary @semgrep.sarif
+        env:
+          VLAB_URL: ${{ secrets.VLAB_URL }}
+          VLAB_INGEST_TOKEN: ${{ secrets.VLAB_INGEST_TOKEN }}
+
+  secrets_scan:
+    name: secrets
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: >
+          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1
+          detect --source /repo -f sarif -r /repo/gitleaks.sarif || true
+      - run: >
+          curl -sf -X POST "$VLAB_URL/api/ingest/sarif"
+          -H "authorization: Bearer $VLAB_INGEST_TOKEN"
+          -H "content-type: application/json"
+          --data-binary @gitleaks.sarif
+        env:
+          VLAB_URL: ${{ secrets.VLAB_URL }}
+          VLAB_INGEST_TOKEN: ${{ secrets.VLAB_INGEST_TOKEN }}
+
+  vuln:
+    name: vuln
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          format: sarif
+          output: trivy.sarif
+      - run: >
+          curl -sf -X POST "$VLAB_URL/api/ingest/sarif"
+          -H "authorization: Bearer $VLAB_INGEST_TOKEN"
+          -H "content-type: application/json"
+          --data-binary @trivy.sarif
+        env:
+          VLAB_URL: ${{ secrets.VLAB_URL }}
+          VLAB_INGEST_TOKEN: ${{ secrets.VLAB_INGEST_TOKEN }}
+
+  package:
+    name: package
+    needs: [sast, secrets_scan, vuln]
+    runs-on: ubuntu-latest
+    env:
+      VLAB_URL: ${{ secrets.VLAB_URL }}
+      VLAB_INGEST_TOKEN: ${{ secrets.VLAB_INGEST_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ github.sha }}
+      - run: >
+          curl -sf -X POST "$VLAB_URL/api/ingest/event"
+          -H "authorization: Bearer $VLAB_INGEST_TOKEN"
+          -H "content-type: application/json"
+          -d "{\"type\":\"image.pushed\",\"payload\":{\"image\":\"ghcr.io/${{ github.repository }}:${{ github.sha }}\",\"digest\":\"${{ steps.push.outputs.digest }}\"}}"
+      - uses: anchore/sbom-action@v0.24.0
+        with:
+          image: ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.json
+          upload-artifact: false
+      - run: |
+          PKGS=$(jq '.packages | length' sbom.json)
+          curl -sf -X POST "$VLAB_URL/api/ingest/event" \
+            -H "authorization: Bearer $VLAB_INGEST_TOKEN" \
+            -H "content-type: application/json" \
+            -d "{\"type\":\"sbom.created\",\"payload\":{\"packages\":$PKGS,\"format\":\"spdx-json\"}}"
+      - uses: sigstore/cosign-installer@v4.1.2
+      - run: cosign sign --yes "ghcr.io/${{ github.repository }}@${{ steps.push.outputs.digest }}"
+      - run: >
+          curl -sf -X POST "$VLAB_URL/api/ingest/event"
+          -H "authorization: Bearer $VLAB_INGEST_TOKEN"
+          -H "content-type: application/json"
+          -d "{\"type\":\"image.signed\",\"payload\":{\"digest\":\"${{ steps.push.outputs.digest }}\",\"issuer\":\"https://token.actions.githubusercontent.com\"}}"
