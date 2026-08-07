@@ -1,0 +1,159 @@
+name: terraform
+on:
+  workflow_call:
+    inputs:
+      env:
+        required: true
+        type: string
+    secrets:
+      VLAB_URL:
+        required: true
+      VLAB_INGEST_TOKEN:
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  AWS_DEFAULT_REGION: us-east-1
+  TF_IN_AUTOMATION: "true"
+  TG_NON_INTERACTIVE: "true"
+
+jobs:
+  iac:
+    name: iac
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: .
+          format: sarif
+          output: iac.sarif
+      - run: >
+          curl -sf --max-time 30 --retry 2 -X POST "$VLAB_URL/api/ingest/sarif"
+          -H "authorization: Bearer $VLAB_INGEST_TOKEN"
+          -H "content-type: application/json"
+          --data-binary @iac.sarif
+        env:
+          VLAB_URL: ${{ secrets.VLAB_URL }}
+          VLAB_INGEST_TOKEN: ${{ secrets.VLAB_INGEST_TOKEN }}
+
+  plan:
+    name: plan
+    needs: iac
+    runs-on: ubuntu-latest
+    services:
+      localstack:
+        image: localstack/localstack:2026.07.2
+        ports:
+          - 4566:4566
+    env:
+      VLAB_URL: ${{ secrets.VLAB_URL }}
+      VLAB_INGEST_TOKEN: ${{ secrets.VLAB_INGEST_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.8"
+          terraform_wrapper: false
+      - name: install terragrunt
+        run: |
+          set -euo pipefail
+          curl -sSLo terragrunt_linux_amd64 "https://github.com/gruntwork-io/terragrunt/releases/download/${TG_VERSION}/terragrunt_linux_amd64"
+          curl -sSLo SHA256SUMS "https://github.com/gruntwork-io/terragrunt/releases/download/${TG_VERSION}/SHA256SUMS"
+          grep 'terragrunt_linux_amd64$' SHA256SUMS | sha256sum -c -
+          chmod +x terragrunt_linux_amd64
+          mv terragrunt_linux_amd64 /usr/local/bin/terragrunt
+        env:
+          TG_VERSION: v1.1.2
+      - name: wait for localstack and seed state bucket
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do curl -sf localhost:4566/_localstack/health >/dev/null && break; sleep 2; done
+          aws --endpoint-url http://localhost:4566 s3 mb s3://vlab-tfstate
+      - name: terragrunt plan
+        run: |
+          set -euo pipefail
+          : > plan.ndjson
+          for m in network storage messaging; do
+            terragrunt --working-dir="envs/${{ inputs.env }}/$m" init -input=false > /dev/null
+            terragrunt --working-dir="envs/${{ inputs.env }}/$m" plan -input=false -json >> plan.ndjson
+          done
+      - name: ingest plan summary
+        run: |
+          set -euo pipefail
+          SUMMARY=$(jq -s '[.[] | select(.type=="change_summary") | .changes] | {add: (map(.add) | add), change: (map(.change) | add), destroy: (map(.remove) | add)}' plan.ndjson)
+          curl -sf --max-time 30 --retry 2 -X POST "$VLAB_URL/api/ingest/event" \
+            -H "authorization: Bearer $VLAB_INGEST_TOKEN" \
+            -H "content-type: application/json" \
+            -d "{\"type\":\"plan.summary\",\"payload\":$SUMMARY}"
+
+  apply:
+    name: apply
+    needs: plan
+    runs-on: ubuntu-latest
+    services:
+      localstack:
+        image: localstack/localstack:2026.07.2
+        ports:
+          - 4566:4566
+    env:
+      VLAB_URL: ${{ secrets.VLAB_URL }}
+      VLAB_INGEST_TOKEN: ${{ secrets.VLAB_INGEST_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.15.8"
+          terraform_wrapper: false
+      - name: install terragrunt
+        run: |
+          set -euo pipefail
+          curl -sSLo terragrunt_linux_amd64 "https://github.com/gruntwork-io/terragrunt/releases/download/${TG_VERSION}/terragrunt_linux_amd64"
+          curl -sSLo SHA256SUMS "https://github.com/gruntwork-io/terragrunt/releases/download/${TG_VERSION}/SHA256SUMS"
+          grep 'terragrunt_linux_amd64$' SHA256SUMS | sha256sum -c -
+          chmod +x terragrunt_linux_amd64
+          mv terragrunt_linux_amd64 /usr/local/bin/terragrunt
+        env:
+          TG_VERSION: v1.1.2
+      - name: wait for localstack and seed state bucket
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do curl -sf localhost:4566/_localstack/health >/dev/null && break; sleep 2; done
+          aws --endpoint-url http://localhost:4566 s3 mb s3://vlab-tfstate
+      - name: terragrunt apply
+        run: |
+          set -euo pipefail
+          : > apply.ndjson
+          for m in network storage messaging; do
+            terragrunt --working-dir="envs/${{ inputs.env }}/$m" init -input=false > /dev/null
+            terragrunt --working-dir="envs/${{ inputs.env }}/$m" apply -input=false -auto-approve -json >> apply.ndjson
+          done
+      - name: ingest applied resources
+        run: |
+          set -euo pipefail
+          jq -c 'select(.type=="apply_complete") | {addr: .hook.resource.addr, type: .hook.resource.resource_type}' apply.ndjson | head -15 | \
+          while read -r R; do
+            curl -sf --max-time 30 --retry 2 -X POST "$VLAB_URL/api/ingest/event" \
+              -H "authorization: Bearer $VLAB_INGEST_TOKEN" \
+              -H "content-type: application/json" \
+              -d "{\"type\":\"resource.applied\",\"payload\":$R}"
+          done
+      - name: verify and ingest resource count
+        run: |
+          set -euo pipefail
+          B=$(aws --endpoint-url http://localhost:4566 s3api list-buckets --query 'length(Buckets)' --output text)
+          T=$(aws --endpoint-url http://localhost:4566 dynamodb list-tables --query 'length(TableNames)' --output text)
+          Q=$(aws --endpoint-url http://localhost:4566 sqs list-queues --query 'length(QueueUrls)' --output text 2>/dev/null || echo 0)
+          V=$(aws --endpoint-url http://localhost:4566 ec2 describe-vpcs --filters Name=tag:Name,Values=vlab-* --query 'length(Vpcs)' --output text)
+          # V já filtrado por tag Name=vlab-*, exclui a VPC default do LocalStack.
+          # -1: vlab-tfstate é o bucket de backend, não é recurso da demo.
+          N=$((B + T + Q + V - 1))
+          curl -sf --max-time 30 --retry 2 -X POST "$VLAB_URL/api/ingest/event" \
+            -H "authorization: Bearer $VLAB_INGEST_TOKEN" \
+            -H "content-type: application/json" \
+            -d "{\"type\":\"verify.passed\",\"payload\":{\"resources\":$N}}"
