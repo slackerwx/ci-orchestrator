@@ -34,6 +34,25 @@ jobs:
           node-version: 22
       - if: inputs.language == 'node'
         run: npm ci
+      - if: inputs.language == 'java'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - if: inputs.language == 'java'
+        run: mvn -B -q package -DskipTests
+      - if: inputs.language == 'dotnet'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
+      - if: inputs.language == 'dotnet'
+        run: dotnet build
+      - if: inputs.language == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - if: inputs.language == 'python'
+        run: pip install -r requirements.txt
 
   sast:
     name: sast

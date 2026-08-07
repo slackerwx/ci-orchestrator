@@ -2,7 +2,7 @@
 
 Reusable GitHub Actions workflow para o pipeline DevSecOps do VirtuaLab. Executa build, SAST (Semgrep), secret scanning (Gitleaks) e scan de vulnerabilidades (Trivy) em paralelo, depois empacota a imagem, gera SBOM e assina com Cosign (keyless, via OIDC). Resultados SARIF e eventos do ciclo de vida da imagem são enviados ao VirtuaLab via `VLAB_URL`.
 
-Cada job carrega o nome do stage correspondente (`build`, `sast`, `secrets`, `vuln`, `package`) para casar com os stage ids esperados pelo VirtuaLab. O input `language` (`go` ou `node`) controla o setup do job `build`.
+Cada job carrega o nome do stage correspondente (`build`, `sast`, `secrets`, `vuln`, `package`) para casar com os stage ids esperados pelo VirtuaLab. O input `language` (`go`, `node`, `java`, `dotnet` ou `python`) controla o setup do job `build`: go usa `setup-go` + `go build`, node usa `setup-node` + `npm ci`, java usa `setup-java` (temurin 17) + `mvn package`, dotnet usa `setup-dotnet` (8.x) + `dotnet build`, python usa `setup-python` (3.12) + `pip install -r requirements.txt`.
 
 ## Uso
 
