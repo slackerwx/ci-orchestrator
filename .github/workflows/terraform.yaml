@@ -80,8 +80,8 @@ jobs:
           set -euo pipefail
           : > plan.ndjson
           for m in network storage messaging; do
-            terragrunt --working-dir="envs/${{ inputs.env }}/$m" init -input=false > /dev/null
-            terragrunt --working-dir="envs/${{ inputs.env }}/$m" plan -input=false -json >> plan.ndjson
+            ( cd "envs/${{ inputs.env }}/$m" && terragrunt init -input=false > /dev/null )
+            ( cd "envs/${{ inputs.env }}/$m" && terragrunt plan -input=false -json ) >> plan.ndjson
           done
       - name: ingest plan summary
         run: |
@@ -130,14 +130,14 @@ jobs:
           set -euo pipefail
           : > apply.ndjson
           for m in network storage messaging; do
-            terragrunt --working-dir="envs/${{ inputs.env }}/$m" init -input=false > /dev/null
-            terragrunt --working-dir="envs/${{ inputs.env }}/$m" apply -input=false -auto-approve -json >> apply.ndjson
+            ( cd "envs/${{ inputs.env }}/$m" && terragrunt init -input=false > /dev/null )
+            ( cd "envs/${{ inputs.env }}/$m" && terragrunt apply -input=false -auto-approve -json ) >> apply.ndjson
           done
       - name: ingest applied resources
         run: |
           set -euo pipefail
-          jq -c 'select(.type=="apply_complete") | {addr: .hook.resource.addr, type: .hook.resource.resource_type}' apply.ndjson | head -15 | \
-          while read -r R; do
+          jq -c 'select(.type=="apply_complete") | {addr: .hook.resource.addr, type: .hook.resource.resource_type}' apply.ndjson > applied.jsonl
+          head -15 applied.jsonl | while read -r R; do
             curl -sf --max-time 30 --retry 2 -X POST "$VLAB_URL/api/ingest/event" \
               -H "authorization: Bearer $VLAB_INGEST_TOKEN" \
               -H "content-type: application/json" \
@@ -148,7 +148,7 @@ jobs:
           set -euo pipefail
           B=$(aws --endpoint-url http://localhost:4566 s3api list-buckets --query 'length(Buckets)' --output text)
           T=$(aws --endpoint-url http://localhost:4566 dynamodb list-tables --query 'length(TableNames)' --output text)
-          Q=$(aws --endpoint-url http://localhost:4566 sqs list-queues --query 'length(QueueUrls)' --output text 2>/dev/null || echo 0)
+          Q=$(aws --endpoint-url http://localhost:4566 sqs list-queues --query 'length(QueueUrls || `[]`)' --output text)
           V=$(aws --endpoint-url http://localhost:4566 ec2 describe-vpcs --filters Name=tag:Name,Values=vlab-* --query 'length(Vpcs)' --output text)
           # V já filtrado por tag Name=vlab-*, exclui a VPC default do LocalStack.
           # -1: vlab-tfstate é o bucket de backend, não é recurso da demo.
