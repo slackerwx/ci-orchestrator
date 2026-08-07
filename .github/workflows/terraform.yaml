@@ -10,6 +10,8 @@ on:
         required: true
       VLAB_INGEST_TOKEN:
         required: true
+      LOCALSTACK_AUTH_TOKEN:
+        required: true
 
 permissions:
   contents: read
@@ -48,7 +50,9 @@ jobs:
     runs-on: ubuntu-latest
     services:
       localstack:
-        image: localstack/localstack:4.14.0
+        image: localstack/localstack:2026.07.2
+        env:
+          LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
         ports:
           - 4566:4566
     env:
@@ -73,7 +77,7 @@ jobs:
       - name: wait for localstack and seed state bucket
         run: |
           set -euo pipefail
-          for i in $(seq 1 30); do curl -sf localhost:4566/_localstack/health >/dev/null && break; sleep 2; done
+          for i in $(seq 1 60); do curl -sf localhost:4566/_localstack/health >/dev/null && break; sleep 2; done
           aws --endpoint-url http://localhost:4566 s3 mb s3://vlab-tfstate
       - name: terragrunt plan
         run: |
@@ -98,7 +102,9 @@ jobs:
     runs-on: ubuntu-latest
     services:
       localstack:
-        image: localstack/localstack:4.14.0
+        image: localstack/localstack:2026.07.2
+        env:
+          LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }}
         ports:
           - 4566:4566
     env:
@@ -123,7 +129,7 @@ jobs:
       - name: wait for localstack and seed state bucket
         run: |
           set -euo pipefail
-          for i in $(seq 1 30); do curl -sf localhost:4566/_localstack/health >/dev/null && break; sleep 2; done
+          for i in $(seq 1 60); do curl -sf localhost:4566/_localstack/health >/dev/null && break; sleep 2; done
           aws --endpoint-url http://localhost:4566 s3 mb s3://vlab-tfstate
       - name: terragrunt apply
         run: |
