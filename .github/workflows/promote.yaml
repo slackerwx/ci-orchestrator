@@ -91,6 +91,9 @@ jobs:
     runs-on: [self-hosted, vlab]
     steps:
       - name: veredito da admissão
+        env:
+          APP_NAME: ${{ inputs.app }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           NS="${{ inputs.namespace }}"
           if [ "${{ inputs.expect_deny }}" = "true" ]; then
@@ -109,12 +112,12 @@ jobs:
             exit 1
           else
             IMG=""
+            # seleciona o pod da TAG promovida e Ready — durante rolling update ha 2 pods e .items[0] podia ler o digest da promocao anterior
             for i in $(seq 1 90); do
-              PHASE=$(sudo kubectl -n "$NS" get pods -l app=${{ inputs.app }} -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true)
-              [ "$PHASE" = "Running" ] && break; sleep 2
+              IMG=$(sudo kubectl -n "$NS" get pods -l app="$APP_NAME" -o jsonpath='{range .items[*]}{.spec.containers[0].image}{" "}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null | grep ":$IMAGE_TAG@.*True" | head -n1 | awk '{print $1}') || true
+              [ -n "$IMG" ] && break; sleep 2
             done
-            [ "$PHASE" = "Running" ] || { echo "pod não chegou a Running em 180s"; sudo kubectl -n "$NS" get pods; exit 1; }
-            IMG=$(sudo kubectl -n "$NS" get pods -l app=${{ inputs.app }} -o jsonpath='{.items[0].spec.containers[0].image}')
+            [ -n "$IMG" ] || { echo "pod da tag $IMAGE_TAG nao ficou Ready em 180s"; sudo kubectl -n "$NS" get pods; exit 1; }
             case "$IMG" in *@sha256:*) ;; *) echo "imagem não pinada por digest: $IMG"; exit 1;; esac
             DIGEST="sha256:${IMG#*@sha256:}"
             curl -sf --max-time 30 --retry 2 -X POST "${{ secrets.VLAB_URL }}/api/ingest/event" \
