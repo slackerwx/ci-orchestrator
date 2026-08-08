@@ -36,20 +36,23 @@ jobs:
         id: commit
         env:
           ENV_PUSH_TOKEN: ${{ secrets.ENV_PUSH_TOKEN }}
+          IMAGE_REPO: ${{ inputs.image_repository }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          TENANT: ${{ inputs.tenant }}
         run: |
           WORK=$(mktemp -d)
+          trap 'rm -rf "$WORK"' EXIT
           git clone --depth 10 "https://x-access-token:${ENV_PUSH_TOKEN}@github.com/${ENV_REPO}.git" "$WORK"
           cd "$WORK"
-          yq -i '.image.repository = "${{ inputs.image_repository }}" | .image.tag = "${{ inputs.image_tag }}"' "$TENANT_FILE"
+          yq -i '.image.repository = strenv(IMAGE_REPO) | .image.tag = strenv(IMAGE_TAG)' "$TENANT_FILE"
           git -c user.name=vlab-promoter -c user.email=vlab-promoter@users.noreply.github.com \
-            commit -am "promote: ${{ inputs.tenant }} -> ${{ inputs.image_tag }}"
+            commit -am "promote: $TENANT -> $IMAGE_TAG"
           git push origin main
           SHA=$(git rev-parse HEAD)
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
           curl -sf --max-time 30 --retry 2 -X POST "${{ secrets.VLAB_URL }}/api/ingest/event" \
             -H "authorization: Bearer ${{ secrets.VLAB_INGEST_TOKEN }}" -H "content-type: application/json" \
-            -d "{\"type\":\"image.promoted\",\"payload\":{\"image\":\"${{ inputs.image_repository }}\",\"tag\":\"${{ inputs.image_tag }}\",\"sha\":\"$SHA\",\"commitUrl\":\"https://github.com/${ENV_REPO}/commit/$SHA\"}}"
-          rm -rf "$WORK"
+            -d "{\"type\":\"image.promoted\",\"payload\":{\"image\":\"$IMAGE_REPO\",\"tag\":\"$IMAGE_TAG\",\"sha\":\"$SHA\",\"commitUrl\":\"https://github.com/${ENV_REPO}/commit/$SHA\"}}" || true
 
   sync:
     name: sync
@@ -57,8 +60,10 @@ jobs:
     runs-on: [self-hosted, vlab]
     steps:
       - name: força refresh e espera a revision
+        env:
+          TENANT: ${{ inputs.tenant }}
         run: |
-          APP="tenant-${{ inputs.tenant }}"
+          APP="tenant-$TENANT"
           TARGET="${{ needs.bump.outputs.sha }}"
           sudo kubectl -n argocd annotate application "$APP" argocd.argoproj.io/refresh=normal --overwrite
           for i in $(seq 1 60); do
@@ -71,7 +76,7 @@ jobs:
           HEALTH=$(sudo kubectl -n argocd get application "$APP" -o jsonpath='{.status.health.status}')
           curl -sf --max-time 30 --retry 2 -X POST "${{ secrets.VLAB_URL }}/api/ingest/event" \
             -H "authorization: Bearer ${{ secrets.VLAB_INGEST_TOKEN }}" -H "content-type: application/json" \
-            -d "{\"type\":\"argocd.synced\",\"payload\":{\"app\":\"$APP\",\"revision\":\"$TARGET\",\"syncStatus\":\"$STATUS\",\"health\":\"$HEALTH\"}}"
+            -d "{\"type\":\"argocd.synced\",\"payload\":{\"app\":\"$APP\",\"revision\":\"$TARGET\",\"syncStatus\":\"$STATUS\",\"health\":\"$HEALTH\"}}" || true
 
   gate:
     name: gate
@@ -92,7 +97,7 @@ jobs:
             SHORT=$(printf '%s' "$MSG" | tr '\n"' ' ' | cut -c1-220)
             curl -sf --max-time 30 --retry 2 -X POST "${{ secrets.VLAB_URL }}/api/ingest/event" \
               -H "authorization: Bearer ${{ secrets.VLAB_INGEST_TOKEN }}" -H "content-type: application/json" \
-              -d "{\"type\":\"admission.verdict\",\"payload\":{\"allowed\":false,\"policy\":\"require-signed-images\",\"message\":\"$SHORT\"}}"
+              -d "{\"type\":\"admission.verdict\",\"payload\":{\"allowed\":false,\"policy\":\"require-signed-images\",\"message\":\"$SHORT\"}}" || true
             echo "gate rejeitou (esperado): $SHORT"
             exit 1
           else
@@ -107,7 +112,7 @@ jobs:
             DIGEST="sha256:${IMG#*@sha256:}"
             curl -sf --max-time 30 --retry 2 -X POST "${{ secrets.VLAB_URL }}/api/ingest/event" \
               -H "authorization: Bearer ${{ secrets.VLAB_INGEST_TOKEN }}" -H "content-type: application/json" \
-              -d "{\"type\":\"admission.verdict\",\"payload\":{\"allowed\":true,\"policy\":\"require-signed-images\",\"digest\":\"$DIGEST\"}}"
+              -d "{\"type\":\"admission.verdict\",\"payload\":{\"allowed\":true,\"policy\":\"require-signed-images\",\"digest\":\"$DIGEST\"}}" || true
           fi
 
   live:
@@ -121,16 +126,20 @@ jobs:
           NS="${{ inputs.namespace }}"; APP="${{ inputs.app }}"; PORT="${{ inputs.port }}"
           sudo kubectl -n "$NS" port-forward "svc/$APP" 18080:"$PORT" >/dev/null 2>&1 &
           PF=$!
+          trap 'sudo kill $PF 2>/dev/null || true' EXIT
           sleep 3
           START=$(date +%s%3N)
-          BODY=$(curl -sf --max-time 10 http://127.0.0.1:18080/ | tr -d '\n"' | cut -c1-120)
+          set +e
+          RESP=$(curl -sf --max-time 10 -w '\n%{http_code}' http://127.0.0.1:18080/)
           STATUS=$?
+          set -e
           END=$(date +%s%3N)
-          sudo kill $PF 2>/dev/null || true
           [ $STATUS -eq 0 ] || { echo "app não respondeu"; exit 1; }
+          HTTP_STATUS=$(printf '%s' "$RESP" | tail -n1)
+          BODY=$(printf '%s' "$RESP" | sed '$d' | tr -d '\n"' | cut -c1-120)
           curl -sf --max-time 30 --retry 2 -X POST "${{ secrets.VLAB_URL }}/api/ingest/event" \
             -H "authorization: Bearer ${{ secrets.VLAB_INGEST_TOKEN }}" -H "content-type: application/json" \
-            -d "{\"type\":\"app.live\",\"payload\":{\"status\":200,\"latencyMs\":$((END - START)),\"bodyExcerpt\":\"$BODY\"}}"
+            -d "{\"type\":\"app.live\",\"payload\":{\"status\":$HTTP_STATUS,\"latencyMs\":$((END - START)),\"bodyExcerpt\":\"$BODY\"}}" || true
 
   revert:
     name: revert
@@ -143,6 +152,7 @@ jobs:
           ENV_PUSH_TOKEN: ${{ secrets.ENV_PUSH_TOKEN }}
         run: |
           WORK=$(mktemp -d)
+          trap 'rm -rf "$WORK"' EXIT
           git clone --depth 10 "https://x-access-token:${ENV_PUSH_TOKEN}@github.com/${ENV_REPO}.git" "$WORK"
           cd "$WORK"
           git -c user.name=vlab-promoter -c user.email=vlab-promoter@users.noreply.github.com \
@@ -151,5 +161,4 @@ jobs:
           SHA=$(git rev-parse HEAD)
           curl -sf --max-time 30 --retry 2 -X POST "${{ secrets.VLAB_URL }}/api/ingest/event" \
             -H "authorization: Bearer ${{ secrets.VLAB_INGEST_TOKEN }}" -H "content-type: application/json" \
-            -d "{\"type\":\"image.reverted\",\"payload\":{\"sha\":\"$SHA\",\"commitUrl\":\"https://github.com/${ENV_REPO}/commit/$SHA\"}}"
-          rm -rf "$WORK"
+            -d "{\"type\":\"image.reverted\",\"payload\":{\"sha\":\"$SHA\",\"commitUrl\":\"https://github.com/${ENV_REPO}/commit/$SHA\"}}" || true
