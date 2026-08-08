@@ -64,21 +64,26 @@ jobs:
       - name: força refresh e espera a revision
         env:
           TENANT: ${{ inputs.tenant }}
+          NS: ${{ inputs.namespace }}
+          APP_NAME: ${{ inputs.app }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
-          APP="tenant-$TENANT"
-          TARGET="${{ needs.bump.outputs.sha }}"
-          sudo kubectl -n argocd annotate application "$APP" argocd.argoproj.io/refresh=normal --overwrite
-          for i in $(seq 1 60); do
-            REV=$(sudo kubectl -n argocd get application "$APP" -o jsonpath='{.status.sync.revision}' 2>/dev/null || true)
+          APP="tenant-${TENANT}"
+          sudo kubectl -n argocd annotate application "$APP" argocd.argoproj.io/refresh=normal --overwrite || true
+          IMG=""; STATUS=""
+          # a Application do tenant aponta pro repo de charts — com applicationset, sync.revision nunca e o sha do bump; o que prova a promocao e a tag materializada no Deployment + Synced
+          # janela de 240s: cobre o pior caso do requeue do git generator do applicationset (3min) + rollout
+          for i in $(seq 1 120); do
+            IMG=$(sudo kubectl -n "$NS" get deploy "$APP_NAME" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
             STATUS=$(sudo kubectl -n argocd get application "$APP" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
-            [ "$REV" = "$TARGET" ] && [ "$STATUS" = "Synced" ] && break
+            case "$IMG" in *:"$IMAGE_TAG") [ "$STATUS" = "Synced" ] && break ;; esac
             sleep 2
           done
-          [ "$REV" = "$TARGET" ] || { echo "sync não alcançou a revision $TARGET (ficou em $REV)"; exit 1; }
-          HEALTH=$(sudo kubectl -n argocd get application "$APP" -o jsonpath='{.status.health.status}')
+          case "$IMG" in *:"$IMAGE_TAG") ;; *) echo "deploy nao materializou a tag $IMAGE_TAG (imagem atual: $IMG; sync: $STATUS)"; exit 1 ;; esac
+          HEALTH=$(sudo kubectl -n argocd get application "$APP" -o jsonpath='{.status.health.status}' 2>/dev/null || true)
           curl -sf --max-time 30 --retry 2 -X POST "${{ secrets.VLAB_URL }}/api/ingest/event" \
             -H "authorization: Bearer ${{ secrets.VLAB_INGEST_TOKEN }}" -H "content-type: application/json" \
-            -d "{\"type\":\"argocd.synced\",\"payload\":{\"app\":\"$APP\",\"revision\":\"$TARGET\",\"syncStatus\":\"$STATUS\",\"health\":\"$HEALTH\"}}" || true
+            -d "{\"type\":\"argocd.synced\",\"payload\":{\"app\":\"$APP\",\"revision\":\"${{ needs.bump.outputs.sha }}\",\"syncStatus\":\"$STATUS\",\"health\":\"$HEALTH\"}}" || true
 
   gate:
     name: gate
