@@ -45,8 +45,10 @@ jobs:
           git clone --depth 10 "https://x-access-token:${ENV_PUSH_TOKEN}@github.com/${ENV_REPO}.git" "$WORK"
           cd "$WORK"
           yq -i '.image.repository = strenv(IMAGE_REPO) | .image.tag = strenv(IMAGE_TAG)' "$TENANT_FILE"
+          git add "$TENANT_FILE"
+          # --allow-empty: re-promover a mesma versao ainda gera commit narravel (spec §6.1) e uma revision nova pro sync rastrear
           git -c user.name=vlab-promoter -c user.email=vlab-promoter@users.noreply.github.com \
-            commit -am "promote: $TENANT -> $IMAGE_TAG"
+            commit --allow-empty -m "promote: ${TENANT} -> ${IMAGE_TAG}"
           git push origin main
           SHA=$(git rev-parse HEAD)
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
