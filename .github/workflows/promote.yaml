@@ -1,0 +1,155 @@
+name: promote
+on:
+  workflow_call:
+    inputs:
+      image_repository: { required: true, type: string }
+      image_tag: { required: true, type: string }
+      expect_deny: { required: false, type: boolean, default: false }
+      tenant: { required: false, type: string, default: time-payments }
+      namespace: { required: false, type: string, default: prod-payments }
+      app: { required: false, type: string, default: payments-api }
+      port: { required: false, type: string, default: '8080' }
+    secrets:
+      VLAB_URL: { required: true }
+      VLAB_INGEST_TOKEN: { required: true }
+      ENV_PUSH_TOKEN: { required: true }
+
+permissions:
+  contents: read
+
+env:
+  ENV_REPO: slackerwx/virtualab-env
+  TENANT_FILE: gitops/tenants/${{ inputs.tenant }}/tenant.yaml
+
+jobs:
+  bump:
+    name: bump
+    runs-on: [self-hosted, vlab]
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - name: garante yq
+        run: |
+          [ -x /usr/local/bin/yq ] || { sudo curl -fsSL -o /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/download/v4.47.1/yq_linux_amd64 && sudo chmod +x /usr/local/bin/yq; }
+      - name: clona, bumpa e pusha
+        id: commit
+        env:
+          ENV_PUSH_TOKEN: ${{ secrets.ENV_PUSH_TOKEN }}
+        run: |
+          WORK=$(mktemp -d)
+          git clone --depth 10 "https://x-access-token:${ENV_PUSH_TOKEN}@github.com/${ENV_REPO}.git" "$WORK"
+          cd "$WORK"
+          yq -i '.image.repository = "${{ inputs.image_repository }}" | .image.tag = "${{ inputs.image_tag }}"' "$TENANT_FILE"
+          git -c user.name=vlab-promoter -c user.email=vlab-promoter@users.noreply.github.com \
+            commit -am "promote: ${{ inputs.tenant }} -> ${{ inputs.image_tag }}"
+          git push origin main
+          SHA=$(git rev-parse HEAD)
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          curl -sf --max-time 30 --retry 2 -X POST "${{ secrets.VLAB_URL }}/api/ingest/event" \
+            -H "authorization: Bearer ${{ secrets.VLAB_INGEST_TOKEN }}" -H "content-type: application/json" \
+            -d "{\"type\":\"image.promoted\",\"payload\":{\"image\":\"${{ inputs.image_repository }}\",\"tag\":\"${{ inputs.image_tag }}\",\"sha\":\"$SHA\",\"commitUrl\":\"https://github.com/${ENV_REPO}/commit/$SHA\"}}"
+          rm -rf "$WORK"
+
+  sync:
+    name: sync
+    needs: bump
+    runs-on: [self-hosted, vlab]
+    steps:
+      - name: força refresh e espera a revision
+        run: |
+          APP="tenant-${{ inputs.tenant }}"
+          TARGET="${{ needs.bump.outputs.sha }}"
+          sudo kubectl -n argocd annotate application "$APP" argocd.argoproj.io/refresh=normal --overwrite
+          for i in $(seq 1 60); do
+            REV=$(sudo kubectl -n argocd get application "$APP" -o jsonpath='{.status.sync.revision}' 2>/dev/null || true)
+            STATUS=$(sudo kubectl -n argocd get application "$APP" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
+            [ "$REV" = "$TARGET" ] && [ "$STATUS" = "Synced" ] && break
+            sleep 2
+          done
+          [ "$REV" = "$TARGET" ] || { echo "sync não alcançou a revision $TARGET (ficou em $REV)"; exit 1; }
+          HEALTH=$(sudo kubectl -n argocd get application "$APP" -o jsonpath='{.status.health.status}')
+          curl -sf --max-time 30 --retry 2 -X POST "${{ secrets.VLAB_URL }}/api/ingest/event" \
+            -H "authorization: Bearer ${{ secrets.VLAB_INGEST_TOKEN }}" -H "content-type: application/json" \
+            -d "{\"type\":\"argocd.synced\",\"payload\":{\"app\":\"$APP\",\"revision\":\"$TARGET\",\"syncStatus\":\"$STATUS\",\"health\":\"$HEALTH\"}}"
+
+  gate:
+    name: gate
+    needs: [bump, sync]
+    runs-on: [self-hosted, vlab]
+    steps:
+      - name: veredito da admissão
+        run: |
+          NS="${{ inputs.namespace }}"
+          if [ "${{ inputs.expect_deny }}" = "true" ]; then
+            MSG=""
+            for i in $(seq 1 60); do
+              MSG=$(sudo kubectl -n "$NS" get events -o json | \
+                jq -r '[.items[] | select(.reason == "FailedCreate") | select(.message | contains("require-signed-images"))] | sort_by(.lastTimestamp) | last | .message // empty')
+              [ -n "$MSG" ] && break; sleep 2
+            done
+            [ -n "$MSG" ] || { echo "deny esperado não foi observado em 120s"; exit 1; }
+            SHORT=$(printf '%s' "$MSG" | tr '\n"' ' ' | cut -c1-220)
+            curl -sf --max-time 30 --retry 2 -X POST "${{ secrets.VLAB_URL }}/api/ingest/event" \
+              -H "authorization: Bearer ${{ secrets.VLAB_INGEST_TOKEN }}" -H "content-type: application/json" \
+              -d "{\"type\":\"admission.verdict\",\"payload\":{\"allowed\":false,\"policy\":\"require-signed-images\",\"message\":\"$SHORT\"}}"
+            echo "gate rejeitou (esperado): $SHORT"
+            exit 1
+          else
+            IMG=""
+            for i in $(seq 1 90); do
+              PHASE=$(sudo kubectl -n "$NS" get pods -l app=${{ inputs.app }} -o jsonpath='{.items[0].status.phase}' 2>/dev/null || true)
+              [ "$PHASE" = "Running" ] && break; sleep 2
+            done
+            [ "$PHASE" = "Running" ] || { echo "pod não chegou a Running em 180s"; sudo kubectl -n "$NS" get pods; exit 1; }
+            IMG=$(sudo kubectl -n "$NS" get pods -l app=${{ inputs.app }} -o jsonpath='{.items[0].spec.containers[0].image}')
+            case "$IMG" in *@sha256:*) ;; *) echo "imagem não pinada por digest: $IMG"; exit 1;; esac
+            DIGEST="sha256:${IMG#*@sha256:}"
+            curl -sf --max-time 30 --retry 2 -X POST "${{ secrets.VLAB_URL }}/api/ingest/event" \
+              -H "authorization: Bearer ${{ secrets.VLAB_INGEST_TOKEN }}" -H "content-type: application/json" \
+              -d "{\"type\":\"admission.verdict\",\"payload\":{\"allowed\":true,\"policy\":\"require-signed-images\",\"digest\":\"$DIGEST\"}}"
+          fi
+
+  live:
+    name: live
+    needs: gate
+    if: ${{ !inputs.expect_deny }}
+    runs-on: [self-hosted, vlab]
+    steps:
+      - name: resposta http real via port-forward
+        run: |
+          NS="${{ inputs.namespace }}"; APP="${{ inputs.app }}"; PORT="${{ inputs.port }}"
+          sudo kubectl -n "$NS" port-forward "svc/$APP" 18080:"$PORT" >/dev/null 2>&1 &
+          PF=$!
+          sleep 3
+          START=$(date +%s%3N)
+          BODY=$(curl -sf --max-time 10 http://127.0.0.1:18080/ | tr -d '\n"' | cut -c1-120)
+          STATUS=$?
+          END=$(date +%s%3N)
+          sudo kill $PF 2>/dev/null || true
+          [ $STATUS -eq 0 ] || { echo "app não respondeu"; exit 1; }
+          curl -sf --max-time 30 --retry 2 -X POST "${{ secrets.VLAB_URL }}/api/ingest/event" \
+            -H "authorization: Bearer ${{ secrets.VLAB_INGEST_TOKEN }}" -H "content-type: application/json" \
+            -d "{\"type\":\"app.live\",\"payload\":{\"status\":200,\"latencyMs\":$((END - START)),\"bodyExcerpt\":\"$BODY\"}}"
+
+  revert:
+    name: revert
+    needs: [bump, gate]
+    if: ${{ always() && inputs.expect_deny && needs.bump.result == 'success' }}
+    runs-on: [self-hosted, vlab]
+    steps:
+      - name: git revert do bump
+        env:
+          ENV_PUSH_TOKEN: ${{ secrets.ENV_PUSH_TOKEN }}
+        run: |
+          WORK=$(mktemp -d)
+          git clone --depth 10 "https://x-access-token:${ENV_PUSH_TOKEN}@github.com/${ENV_REPO}.git" "$WORK"
+          cd "$WORK"
+          git -c user.name=vlab-promoter -c user.email=vlab-promoter@users.noreply.github.com \
+            revert --no-edit "${{ needs.bump.outputs.sha }}"
+          git push origin main
+          SHA=$(git rev-parse HEAD)
+          curl -sf --max-time 30 --retry 2 -X POST "${{ secrets.VLAB_URL }}/api/ingest/event" \
+            -H "authorization: Bearer ${{ secrets.VLAB_INGEST_TOKEN }}" -H "content-type: application/json" \
+            -d "{\"type\":\"image.reverted\",\"payload\":{\"sha\":\"$SHA\",\"commitUrl\":\"https://github.com/${ENV_REPO}/commit/$SHA\"}}"
+          rm -rf "$WORK"

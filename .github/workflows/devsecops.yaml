@@ -10,6 +10,13 @@ on:
         required: true
       VLAB_INGEST_TOKEN:
         required: true
+    outputs:
+      image_tag:
+        description: tag da imagem publicada (sha do commit)
+        value: ${{ jobs.package.outputs.image_tag }}
+      digest:
+        description: digest da imagem publicada
+        value: ${{ jobs.package.outputs.digest }}
 
 permissions:
   contents: read
@@ -119,6 +126,9 @@ jobs:
     env:
       VLAB_URL: ${{ secrets.VLAB_URL }}
       VLAB_INGEST_TOKEN: ${{ secrets.VLAB_INGEST_TOKEN }}
+    outputs:
+      image_tag: ${{ github.sha }}
+      digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
       - run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
