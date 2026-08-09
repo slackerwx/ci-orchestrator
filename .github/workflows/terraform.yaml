@@ -156,8 +156,8 @@ jobs:
           T=$(aws --endpoint-url http://localhost:4566 dynamodb list-tables --query 'length(TableNames)' --output text)
           Q=$(aws --endpoint-url http://localhost:4566 sqs list-queues --query 'length(QueueUrls || `[]`)' --output text)
           V=$(aws --endpoint-url http://localhost:4566 ec2 describe-vpcs --filters Name=tag:Name,Values=vlab-* --query 'length(Vpcs)' --output text)
-          # V já filtrado por tag Name=vlab-*, exclui a VPC default do LocalStack.
-          # -1: vlab-tfstate é o bucket de backend, não é recurso da demo.
+          # V is already filtered by tag Name=vlab-*, excluding the LocalStack default VPC.
+          # -1: vlab-tfstate is the backend bucket, not a demo resource.
           N=$((B + T + Q + V - 1))
           curl -sf --max-time 30 --retry 2 -X POST "$VLAB_URL/api/ingest/event" \
             -H "authorization: Bearer $VLAB_INGEST_TOKEN" \

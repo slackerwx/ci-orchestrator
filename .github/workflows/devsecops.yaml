@@ -12,10 +12,10 @@ on:
         required: true
     outputs:
       image_tag:
-        description: tag da imagem publicada (sha do commit)
+        description: published image tag (commit sha)
         value: ${{ jobs.package.outputs.image_tag }}
       digest:
-        description: digest da imagem publicada
+        description: published image digest
         value: ${{ jobs.package.outputs.digest }}
 
 permissions:
@@ -161,7 +161,7 @@ jobs:
             -H "content-type: application/json" \
             -d "{\"type\":\"sbom.created\",\"payload\":{\"packages\":$PKGS,\"format\":\"spdx-json\"}}"
       - uses: sigstore/cosign-installer@v4.1.2
-      # formato legado .sig: o verifyImages do kyverno 3.8.x nao le o bundle novo do cosign 3.x
+      # legacy .sig format: kyverno 3.8.x verifyImages does not read the new cosign 3.x bundle
       - run: cosign sign --yes --new-bundle-format=false --use-signing-config=false --registry-referrers-mode=legacy "${{ env.IMAGE }}@${{ steps.push.outputs.digest }}"
       - run: >
           curl -sf --max-time 30 --retry 2 -X POST "$VLAB_URL/api/ingest/event"

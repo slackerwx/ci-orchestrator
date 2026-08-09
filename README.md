@@ -1,10 +1,10 @@
 # ci-orchestrator
 
-Reusable GitHub Actions workflow para o pipeline DevSecOps do VirtuaLab. Executa build, SAST (Semgrep), secret scanning (Gitleaks) e scan de vulnerabilidades (Trivy) em paralelo, depois empacota a imagem, gera SBOM e assina com Cosign (keyless, via OIDC). Resultados SARIF e eventos do ciclo de vida da imagem são enviados ao VirtuaLab via `VLAB_URL`.
+Reusable GitHub Actions workflow for the VirtuaLab DevSecOps pipeline. Runs build, SAST (Semgrep), secret scanning (Gitleaks) and vulnerability scanning (Trivy) in parallel, then packages the image, generates an SBOM and signs it with Cosign (keyless, via OIDC). SARIF results and image lifecycle events are sent to VirtuaLab via `VLAB_URL`.
 
-Cada job carrega o nome do stage correspondente (`build`, `sast`, `secrets`, `vuln`, `package`) para casar com os stage ids esperados pelo VirtuaLab. O input `language` (`go`, `node`, `java`, `dotnet` ou `python`) controla o setup do job `build`: go usa `setup-go` + `go build`, node usa `setup-node` + `npm ci`, java usa `setup-java` (temurin 17) + `mvn package`, dotnet usa `setup-dotnet` (8.x) + `dotnet build`, python usa `setup-python` (3.12) + `pip install -r requirements.txt`.
+Each job carries the name of its corresponding stage (`build`, `sast`, `secrets`, `vuln`, `package`) to match the stage ids expected by VirtuaLab. The `language` input (`go`, `node`, `java`, `dotnet` or `python`) controls the `build` job setup: go uses `setup-go` + `go build`, node uses `setup-node` + `npm ci`, java uses `setup-java` (temurin 17) + `mvn package`, dotnet uses `setup-dotnet` (8.x) + `dotnet build`, python uses `setup-python` (3.12) + `pip install -r requirements.txt`.
 
-## Uso
+## Usage
 
 ```yaml
 name: pipeline
@@ -24,15 +24,15 @@ jobs:
       VLAB_INGEST_TOKEN: ${{ secrets.VLAB_INGEST_TOKEN }}
 ```
 
-O bloco `permissions` no job caller é obrigatório: um reusable workflow só restringe as permissões herdadas do chamador, nunca amplia. Sem `packages: write` e `id-token: write` declarados aí, o job `package` falha (push no GHCR com 403, assinatura Cosign sem token OIDC).
+The `permissions` block on the caller job is mandatory: a reusable workflow can only restrict the permissions inherited from the caller, never broaden them. Without `packages: write` and `id-token: write` declared there, the `package` job fails (GHCR push with 403, Cosign signing without an OIDC token).
 
 ## terraform.yaml
 
-Reusable workflow para o pipeline de IaC do VirtuaLab. Roda `trivy-action` (scan-type `config`) contra o repo chamador, depois sobe um LocalStack em `services` e executa `plan`/`apply` via Terragrunt nos módulos `network`, `storage` e `messaging` de `envs/<env>/`, nessa ordem (network antes de storage/messaging por causa de dependências implícitas de rede). Jobs nomeados `iac`, `plan`, `apply` para casar com os stage ids do VirtuaLab. SARIF do `iac` e eventos `plan.summary` / `resource.applied` / `verify.passed` são enviados via `VLAB_URL`.
+Reusable workflow for the VirtuaLab IaC pipeline. Runs `trivy-action` (scan-type `config`) against the caller repo, then spins up a LocalStack in `services` and executes `plan`/`apply` via Terragrunt on the `network`, `storage` and `messaging` modules under `envs/<env>/`, in that order (network before storage/messaging due to implicit network dependencies). Jobs are named `iac`, `plan`, `apply` to match the VirtuaLab stage ids. The `iac` SARIF and the `plan.summary` / `resource.applied` / `verify.passed` events are sent via `VLAB_URL`.
 
-Versões pinadas: Terraform `1.15.8` (`terraform_wrapper: false`, já que quem chama o binário é o Terragrunt), Terragrunt `v1.1.2` (binário baixado da release e validado contra o `SHA256SUMS` oficial), `localstack/localstack:2026.07.2`. Terragrunt v1.x usa `--working-dir` (em vez do antigo `-chdir`) e `--non-interactive`/`TG_NON_INTERACTIVE` para rodar sem prompts em CI.
+Pinned versions: Terraform `1.15.8` (`terraform_wrapper: false`, since Terragrunt is what calls the binary), Terragrunt `v1.1.2` (binary downloaded from the release and validated against the official `SHA256SUMS`), `localstack/localstack:2026.07.2`. Terragrunt v1.x uses `--working-dir` (instead of the old `-chdir`) and `--non-interactive`/`TG_NON_INTERACTIVE` to run without prompts in CI.
 
-O job `apply` conta os recursos criados (`s3api list-buckets` + `dynamodb list-tables` + `sqs list-queues` + `ec2 describe-vpcs` filtrado por `tag:Name=vlab-*`, que exclui a VPC default do LocalStack) e subtrai 1 do total pelo bucket `vlab-tfstate` do backend, que não é recurso da demo.
+The `apply` job counts the created resources (`s3api list-buckets` + `dynamodb list-tables` + `sqs list-queues` + `ec2 describe-vpcs` filtered by `tag:Name=vlab-*`, which excludes the LocalStack default VPC) and subtracts 1 from the total for the backend's `vlab-tfstate` bucket, which is not a demo resource.
 
 ```yaml
 name: pipeline

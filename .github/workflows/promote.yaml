@@ -28,11 +28,11 @@ jobs:
     outputs:
       sha: ${{ steps.commit.outputs.sha }}
     steps:
-      - name: garante yq
+      - name: ensure yq
         run: |
           [ -x /usr/local/bin/yq ] || { sudo curl -fsSL -o /usr/local/bin/yq \
             https://github.com/mikefarah/yq/releases/download/v4.47.1/yq_linux_amd64 && sudo chmod +x /usr/local/bin/yq; }
-      - name: clona, bumpa e pusha
+      - name: clone, bump and push
         id: commit
         env:
           ENV_PUSH_TOKEN: ${{ secrets.ENV_PUSH_TOKEN }}
@@ -46,7 +46,7 @@ jobs:
           cd "$WORK"
           yq -i '.image.repository = strenv(IMAGE_REPO) | .image.tag = strenv(IMAGE_TAG)' "$TENANT_FILE"
           git add "$TENANT_FILE"
-          # --allow-empty: re-promover a mesma versao ainda gera commit narravel (spec §6.1) e uma revision nova pro sync rastrear
+          # --allow-empty: re-promoting the same version still produces a narratable commit (spec §6.1) and a new revision for sync to track
           git -c user.name=vlab-promoter -c user.email=vlab-promoter@users.noreply.github.com \
             commit --allow-empty -m "promote: ${TENANT} -> ${IMAGE_TAG}"
           git push origin main
@@ -61,7 +61,7 @@ jobs:
     needs: bump
     runs-on: [self-hosted, vlab]
     steps:
-      - name: força refresh e espera a revision
+      - name: force refresh and wait for the revision
         env:
           TENANT: ${{ inputs.tenant }}
           NS: ${{ inputs.namespace }}
@@ -71,15 +71,15 @@ jobs:
           APP="tenant-${TENANT}"
           sudo kubectl -n argocd annotate application "$APP" argocd.argoproj.io/refresh=normal --overwrite || true
           IMG=""; STATUS=""
-          # a Application do tenant aponta pro repo de charts — com applicationset, sync.revision nunca e o sha do bump; o que prova a promocao e a tag materializada no Deployment + Synced
-          # janela de 240s: cobre o pior caso do requeue do git generator do applicationset (3min) + rollout
+          # the tenant Application points at the charts repo — with applicationset, sync.revision is never the bump sha; what proves the promotion is the tag materialized in the Deployment + Synced
+          # 240s window: covers the worst case of the applicationset git generator requeue (3min) + rollout
           for i in $(seq 1 120); do
             IMG=$(sudo kubectl -n "$NS" get deploy "$APP_NAME" -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)
             STATUS=$(sudo kubectl -n argocd get application "$APP" -o jsonpath='{.status.sync.status}' 2>/dev/null || true)
             case "$IMG" in *:"$IMAGE_TAG") [ "$STATUS" = "Synced" ] && break ;; esac
             sleep 2
           done
-          case "$IMG" in *:"$IMAGE_TAG") ;; *) echo "deploy nao materializou a tag $IMAGE_TAG (imagem atual: $IMG; sync: $STATUS)"; exit 1 ;; esac
+          case "$IMG" in *:"$IMAGE_TAG") ;; *) echo "deploy did not materialize tag $IMAGE_TAG (current image: $IMG; sync: $STATUS)"; exit 1 ;; esac
           HEALTH=$(sudo kubectl -n argocd get application "$APP" -o jsonpath='{.status.health.status}' 2>/dev/null || true)
           curl -sf --max-time 30 --retry 2 -X POST "${{ secrets.VLAB_URL }}/api/ingest/event" \
             -H "authorization: Bearer ${{ secrets.VLAB_INGEST_TOKEN }}" -H "content-type: application/json" \
@@ -90,7 +90,7 @@ jobs:
     needs: [bump, sync]
     runs-on: [self-hosted, vlab]
     steps:
-      - name: veredito da admissão
+      - name: admission verdict
         env:
           APP_NAME: ${{ inputs.app }}
           IMAGE_TAG: ${{ inputs.image_tag }}
@@ -103,22 +103,22 @@ jobs:
                 jq -r '[.items[] | select(.reason == "FailedCreate") | select(.message | contains("require-signed-images"))] | sort_by(.lastTimestamp) | last | .message // empty')
               [ -n "$MSG" ] && break; sleep 2
             done
-            [ -n "$MSG" ] || { echo "deny esperado não foi observado em 120s"; exit 1; }
+            [ -n "$MSG" ] || { echo "expected deny was not observed within 120s"; exit 1; }
             SHORT=$(printf '%s' "$MSG" | tr '\n"' ' ' | cut -c1-220)
             curl -sf --max-time 30 --retry 2 -X POST "${{ secrets.VLAB_URL }}/api/ingest/event" \
               -H "authorization: Bearer ${{ secrets.VLAB_INGEST_TOKEN }}" -H "content-type: application/json" \
               -d "{\"type\":\"admission.verdict\",\"payload\":{\"allowed\":false,\"policy\":\"require-signed-images\",\"message\":\"$SHORT\"}}" || true
-            echo "gate rejeitou (esperado): $SHORT"
+            echo "gate denied (expected): $SHORT"
             exit 1
           else
             IMG=""
-            # seleciona o pod da TAG promovida e Ready — durante rolling update ha 2 pods e .items[0] podia ler o digest da promocao anterior
+            # select the pod that carries the promoted TAG and is Ready — during a rolling update there are 2 pods and .items[0] could read the previous promotion's digest
             for i in $(seq 1 90); do
               IMG=$(sudo kubectl -n "$NS" get pods -l app="$APP_NAME" -o jsonpath='{range .items[*]}{.spec.containers[0].image}{" "}{.status.conditions[?(@.type=="Ready")].status}{"\n"}{end}' 2>/dev/null | grep ":$IMAGE_TAG@.*True" | head -n1 | awk '{print $1}') || true
               [ -n "$IMG" ] && break; sleep 2
             done
-            [ -n "$IMG" ] || { echo "pod da tag $IMAGE_TAG nao ficou Ready em 180s"; sudo kubectl -n "$NS" get pods; exit 1; }
-            case "$IMG" in *@sha256:*) ;; *) echo "imagem não pinada por digest: $IMG"; exit 1;; esac
+            [ -n "$IMG" ] || { echo "pod for tag $IMAGE_TAG did not become Ready within 180s"; sudo kubectl -n "$NS" get pods; exit 1; }
+            case "$IMG" in *@sha256:*) ;; *) echo "image not pinned by digest: $IMG"; exit 1;; esac
             DIGEST="sha256:${IMG#*@sha256:}"
             curl -sf --max-time 30 --retry 2 -X POST "${{ secrets.VLAB_URL }}/api/ingest/event" \
               -H "authorization: Bearer ${{ secrets.VLAB_INGEST_TOKEN }}" -H "content-type: application/json" \
@@ -131,7 +131,7 @@ jobs:
     if: ${{ !inputs.expect_deny }}
     runs-on: [self-hosted, vlab]
     steps:
-      - name: resposta http real via port-forward
+      - name: real http response via port-forward
         run: |
           NS="${{ inputs.namespace }}"; APP="${{ inputs.app }}"; PORT="${{ inputs.port }}"
           sudo kubectl -n "$NS" port-forward "svc/$APP" 18080:"$PORT" >/dev/null 2>&1 &
@@ -144,7 +144,7 @@ jobs:
           STATUS=$?
           set -e
           END=$(date +%s%3N)
-          [ $STATUS -eq 0 ] || { echo "app não respondeu"; exit 1; }
+          [ $STATUS -eq 0 ] || { echo "app did not respond"; exit 1; }
           HTTP_STATUS=$(printf '%s' "$RESP" | tail -n1)
           BODY=$(printf '%s' "$RESP" | sed '$d' | tr -d '\n"' | cut -c1-120)
           curl -sf --max-time 30 --retry 2 -X POST "${{ secrets.VLAB_URL }}/api/ingest/event" \
@@ -157,7 +157,7 @@ jobs:
     if: ${{ always() && inputs.expect_deny && needs.bump.result == 'success' }}
     runs-on: [self-hosted, vlab]
     steps:
-      - name: git revert do bump
+      - name: git revert the bump
         env:
           ENV_PUSH_TOKEN: ${{ secrets.ENV_PUSH_TOKEN }}
         run: |
