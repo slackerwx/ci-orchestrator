@@ -53,7 +53,7 @@ jobs:
       id-token: write        # keyless cosign signing mints an OIDC token
       pull-requests: write   # evidence job's sticky findings comment
       security-events: write # evidence job declares it even with upload-sarif off
-    uses: slackerwx/devsecops-pipeline/.github/workflows/pipeline.yml@d746477802a801bab9a5a20b7f8934498d234d25  # v1.0.0
+    uses: slackerwx/devsecops-pipeline/.github/workflows/pipeline.yml@5f3c7881de9f62a1c9334b3467a1b9cdbcc95258  # v1.0.1
     with:
       stack: ${{ inputs.language }}
       mode: audit                      # the samples carry planted CVEs on purpose
