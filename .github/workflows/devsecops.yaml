@@ -3,6 +3,7 @@ on:
   workflow_call:
     inputs:
       language:
+        description: go | node | java | dotnet | python
         required: true
         type: string
     secrets:
@@ -12,159 +13,66 @@ on:
         required: true
     outputs:
       image_tag:
-        description: published image tag (commit sha)
-        value: ${{ jobs.package.outputs.image_tag }}
+        description: published image tag (sha-<commit sha>)
+        value: ${{ jobs.outputs.outputs.image_tag }}
       digest:
         description: published image digest
-        value: ${{ jobs.package.outputs.digest }}
+        value: ${{ jobs.outputs.outputs.digest }}
 
-permissions:
-  contents: read
-  packages: write
-  id-token: write
+permissions: {}
 
 jobs:
-  build:
-    name: build
+  config:
+    name: config
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - if: inputs.language == 'go'
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version-file: go.mod
-      - if: inputs.language == 'go'
-        run: go build ./...
-      - if: inputs.language == 'node'
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: 22
-      - if: inputs.language == 'node'
-        run: npm ci
-      - if: inputs.language == 'java'
-        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
-        with:
-          distribution: temurin
-          java-version: '17'
-      - if: inputs.language == 'java'
-        run: mvn -B -q package -DskipTests
-      - if: inputs.language == 'dotnet'
-        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
-        with:
-          dotnet-version: '8.x'
-      - if: inputs.language == 'dotnet'
-        run: dotnet build
-      - if: inputs.language == 'python'
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.12'
-      - if: inputs.language == 'python'
-        run: pip install -r requirements.txt
-
-  sast:
-    name: sast
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - run: pipx install semgrep==1.172.0
-      - run: semgrep scan --config auto --sarif --output semgrep.sarif || true
-      - run: >
-          curl -sf --max-time 30 --retry 2 -X POST "$VLAB_URL/api/ingest/sarif"
-          -H "authorization: Bearer $VLAB_INGEST_TOKEN"
-          -H "content-type: application/json"
-          --data-binary @semgrep.sarif
-        env:
-          VLAB_URL: ${{ secrets.VLAB_URL }}
-          VLAB_INGEST_TOKEN: ${{ secrets.VLAB_INGEST_TOKEN }}
-
-  secrets_scan:
-    name: secrets
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 0
-      - run: >
-          docker run --rm -v "$PWD:/repo" ghcr.io/gitleaks/gitleaks:v8.30.1
-          detect --source /repo -f sarif -r /repo/gitleaks.sarif || true
-      - run: >
-          curl -sf --max-time 30 --retry 2 -X POST "$VLAB_URL/api/ingest/sarif"
-          -H "authorization: Bearer $VLAB_INGEST_TOKEN"
-          -H "content-type: application/json"
-          --data-binary @gitleaks.sarif
-        env:
-          VLAB_URL: ${{ secrets.VLAB_URL }}
-          VLAB_INGEST_TOKEN: ${{ secrets.VLAB_INGEST_TOKEN }}
-
-  vuln:
-    name: vuln
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          format: sarif
-          output: trivy.sarif
-      - run: >
-          curl -sf --max-time 30 --retry 2 -X POST "$VLAB_URL/api/ingest/sarif"
-          -H "authorization: Bearer $VLAB_INGEST_TOKEN"
-          -H "content-type: application/json"
-          --data-binary @trivy.sarif
-        env:
-          VLAB_URL: ${{ secrets.VLAB_URL }}
-          VLAB_INGEST_TOKEN: ${{ secrets.VLAB_INGEST_TOKEN }}
-
-  package:
-    name: package
-    needs: [sast, secrets_scan, vuln]
-    runs-on: ubuntu-latest
-    env:
-      VLAB_URL: ${{ secrets.VLAB_URL }}
-      VLAB_INGEST_TOKEN: ${{ secrets.VLAB_INGEST_TOKEN }}
+    timeout-minutes: 2
     outputs:
-      image_tag: ${{ github.sha }}
-      digest: ${{ steps.push.outputs.digest }}
+      port: ${{ steps.map.outputs.port }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: push
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          push: true
-          tags: ${{ env.IMAGE }}:${{ github.sha }}
-      - run: >
-          curl -sf --max-time 30 --retry 2 -X POST "$VLAB_URL/api/ingest/event"
-          -H "authorization: Bearer $VLAB_INGEST_TOKEN"
-          -H "content-type: application/json"
-          -d "{\"type\":\"image.pushed\",\"payload\":{\"image\":\"${{ env.IMAGE }}:${{ github.sha }}\",\"digest\":\"${{ steps.push.outputs.digest }}\"}}"
-      - uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
-        with:
-          image: ${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
-          format: spdx-json
-          output-file: sbom.json
-          upload-artifact: false
-      - run: |
-          PKGS=$(jq '.packages | length' sbom.json)
-          curl -sf --max-time 30 --retry 2 -X POST "$VLAB_URL/api/ingest/event" \
-            -H "authorization: Bearer $VLAB_INGEST_TOKEN" \
-            -H "content-type: application/json" \
-            -d "{\"type\":\"sbom.created\",\"payload\":{\"packages\":$PKGS,\"format\":\"spdx-json\"}}"
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-      # legacy .sig format: kyverno 3.8.x verifyImages does not read the new cosign 3.x bundle
-      - run: cosign sign --yes --new-bundle-format=false --use-signing-config=false --registry-referrers-mode=legacy "${{ env.IMAGE }}@${{ steps.push.outputs.digest }}"
-      - run: >
-          curl -sf --max-time 30 --retry 2 -X POST "$VLAB_URL/api/ingest/event"
-          -H "authorization: Bearer $VLAB_INGEST_TOKEN"
-          -H "content-type: application/json"
-          -d "{\"type\":\"image.signed\",\"payload\":{\"digest\":\"${{ steps.push.outputs.digest }}\",\"issuer\":\"https://token.actions.githubusercontent.com\"}}"
+      - id: map
+        env:
+          LANGUAGE: ${{ inputs.language }}
+        run: |
+          case "$LANGUAGE" in
+            node) port=3000 ;;
+            python) port=5000 ;;
+            go|java|dotnet) port=8080 ;;
+            *) echo "unsupported language: $LANGUAGE"; exit 1 ;;
+          esac
+          echo "port=$port" >> "$GITHUB_OUTPUT"
+
+  pipeline:
+    name: pipeline
+    needs: config
+    # devsecops-pipeline declares the minimum per job and a reusable workflow can only narrow what
+    # the caller granted, so every one of these must also be granted by the VirtuaLab caller job.
+    # Missing any of them fails the run at startup with zero jobs created.
+    permissions:
+      contents: read
+      packages: write        # image job pushes to GHCR, sign job attaches the signature
+      id-token: write        # keyless cosign signing mints an OIDC token
+      pull-requests: write   # evidence job's sticky findings comment
+      security-events: write # evidence job declares it even with upload-sarif off
+    uses: slackerwx/devsecops-pipeline/.github/workflows/pipeline.yml@d746477802a801bab9a5a20b7f8934498d234d25  # v1.0.0
+    with:
+      stack: ${{ inputs.language }}
+      mode: audit                      # the samples carry planted CVEs on purpose
+      push: always
+      cosign-signature-format: legacy  # kyverno 3.8.x verifyImages reads .sig tags
+      app-port: ${{ needs.config.outputs.port }}
+    secrets:
+      EVIDENCE_WEBHOOK_URL: ${{ format('{0}/api/ingest', secrets.VLAB_URL) }}
+      EVIDENCE_WEBHOOK_TOKEN: ${{ secrets.VLAB_INGEST_TOKEN }}
+
+  outputs:
+    name: outputs
+    needs: pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      image_tag: sha-${{ github.sha }}
+      digest: ${{ needs.pipeline.outputs.digest }}
+    steps:
+      - env:
+          DIGEST: ${{ needs.pipeline.outputs.digest }}
+        run: echo "image_tag=sha-${GITHUB_SHA} digest=${DIGEST}"

@@ -1,8 +1,11 @@
 # ci-orchestrator
 
-Reusable GitHub Actions workflow for the VirtuaLab DevSecOps pipeline. Runs build, SAST (Semgrep), secret scanning (Gitleaks) and vulnerability scanning (Trivy) in parallel, then packages the image, generates an SBOM and signs it with Cosign (keyless, via OIDC). SARIF results and image lifecycle events are sent to VirtuaLab via `VLAB_URL`.
-
-Each job carries the name of its corresponding stage (`build`, `sast`, `secrets`, `vuln`, `package`) to match the stage ids expected by VirtuaLab. The `language` input (`go`, `node`, `java`, `dotnet` or `python`) controls the `build` job setup: go uses `setup-go` + `go build`, node uses `setup-node` + `npm ci`, java uses `setup-java` (temurin 17) + `mvn package`, dotnet uses `setup-dotnet` (8.x) + `dotnet build`, python uses `setup-python` (3.12) + `pip install -r requirements.txt`.
+`devsecops.yaml` is a thin adapter over [`slackerwx/devsecops-pipeline`](https://github.com/slackerwx/devsecops-pipeline):
+it maps `language` → `stack`, runs the pipeline in `audit` mode (the sample apps carry planted
+CVEs), always publishes, signs with the legacy Cosign format Kyverno 3.8 reads, enables DAST on the
+sample's port and forwards SARIF/custody events to VirtuaLab through the pipeline's evidence webhook
+(`VLAB_URL/api/ingest`). Stage names seen by VirtuaLab are the pipeline's job names:
+`plan, build, test, secrets, sast, sca, iac, image, dast, sign, evidence`.
 
 ## Usage
 
@@ -16,6 +19,8 @@ jobs:
       contents: read
       packages: write
       id-token: write
+      pull-requests: write
+      security-events: write
     uses: slackerwx/ci-orchestrator/.github/workflows/devsecops.yaml@main
     with:
       language: go
@@ -24,7 +29,7 @@ jobs:
       VLAB_INGEST_TOKEN: ${{ secrets.VLAB_INGEST_TOKEN }}
 ```
 
-The `permissions` block on the caller job is mandatory: a reusable workflow can only restrict the permissions inherited from the caller, never broaden them. Without `packages: write` and `id-token: write` declared there, the `package` job fails (GHCR push with 403, Cosign signing without an OIDC token).
+The `permissions` block on the caller job is mandatory, and all five entries are required: a reusable workflow can only restrict the permissions inherited from the caller, never broaden them, and that rule applies down the whole chain (caller → `devsecops.yaml` → `devsecops-pipeline`). `packages: write` covers the GHCR push and the Cosign signature upload, `id-token: write` the keyless OIDC signing, and `pull-requests: write` + `security-events: write` are declared by the pipeline's `evidence` job (it declares both unconditionally, even though the sticky PR comment and the Code Scanning upload are themselves optional). Omitting any of them does not fail a job — it fails the whole run at startup with zero jobs created.
 
 ## terraform.yaml
 
