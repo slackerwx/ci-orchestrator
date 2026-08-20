@@ -28,18 +28,24 @@ jobs:
     timeout-minutes: 2
     outputs:
       port: ${{ steps.map.outputs.port }}
+      health: ${{ steps.map.outputs.health }}
     steps:
       - id: map
         env:
           LANGUAGE: ${{ inputs.language }}
         run: |
+          # health must name a route the sample actually serves: the DAST readiness probe is
+          # `curl -fsS`, so the pipeline's default of / reads a 404 as "never came up" and the
+          # stage times out against a healthy container. Only sample-go serves / at all.
           case "$LANGUAGE" in
-            node) port=3000 ;;
-            python) port=5000 ;;
-            go|java|dotnet) port=8080 ;;
+            node) port=3000; health=/health ;;
+            python) port=5000; health=/health ;;
+            go) port=8080; health=/ ;;
+            java|dotnet) port=8080; health=/health ;;
             *) echo "unsupported language: $LANGUAGE"; exit 1 ;;
           esac
           echo "port=$port" >> "$GITHUB_OUTPUT"
+          echo "health=$health" >> "$GITHUB_OUTPUT"
 
   pipeline:
     name: pipeline
@@ -60,6 +66,7 @@ jobs:
       push: always
       cosign-signature-format: legacy  # kyverno 3.8.x verifyImages reads .sig tags
       app-port: ${{ needs.config.outputs.port }}
+      app-health-path: ${{ needs.config.outputs.health }}
     secrets:
       EVIDENCE_WEBHOOK_URL: ${{ format('{0}/api/ingest', secrets.VLAB_URL) }}
       EVIDENCE_WEBHOOK_TOKEN: ${{ secrets.VLAB_INGEST_TOKEN }}
