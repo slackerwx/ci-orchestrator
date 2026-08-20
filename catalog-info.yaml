@@ -1,0 +1,26 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: ci-orchestrator
+  title: CI Orchestrator
+  description: Reusable GitHub Actions workflows for the VirtuaLab DevSecOps, IaC and GitOps promotion pipelines
+  annotations:
+    github.com/project-slug: slackerwx/ci-orchestrator
+  tags:
+    - github-actions
+    - reusable-workflow
+    - devsecops
+    - devsecops-pipeline
+    - cosign
+    - trivy
+    - gitops
+spec:
+  type: library
+  lifecycle: production
+  owner: user:slackerwx
+  system: virtualab
+  consumesApis:
+    - virtualab-ingest-api
+  dependsOn:
+    - component:virtualab-env
+    - component:devsecops-pipeline
